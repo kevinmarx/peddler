@@ -1,0 +1,152 @@
+name: Cleanup Resources
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: 'Stage to cleanup (DANGER: This will delete all resources)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: 'dev'
+      region:
+        description: 'AWS Region'
+        required: true
+        default: 'us-east-1'
+        type: string
+      confirm:
+        description: 'Type "DELETE" to confirm resource deletion'
+        required: true
+        type: string
+
+env:
+  NODE_VERSION: '18'
+  AWS_REGION: ${{ github.event.inputs.region || 'us-east-1' }}
+
+jobs:
+  cleanup:
+    name: Cleanup AWS Resources
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'DELETE'
+    environment: ${{ github.event.inputs.stage == 'prod' && 'production' || 'development' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ github.event.inputs.stage == 'prod' && secrets.AWS_ACCESS_KEY_ID_PROD || secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ github.event.inputs.stage == 'prod' && secrets.AWS_SECRET_ACCESS_KEY_PROD || secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Serverless Framework
+        run: npm install -g serverless@3
+
+      - name: Backup configuration before cleanup
+        run: |
+          echo "Backing up configuration and secrets..."
+          mkdir -p backups
+
+          # Backup SSM parameter
+          aws ssm get-parameter \
+            --name "/peddler/${{ github.event.inputs.stage }}/config" \
+            --query "Parameter.Value" \
+            --output text > backups/config-${{ github.event.inputs.stage }}-$(date +%Y%m%d-%H%M%S).json || true
+
+          # Note: We don't backup secrets for security reasons
+          echo "Configuration backed up to backups/ directory"
+
+      - name: Remove Serverless stack
+        run: |
+          echo "🗑️ Removing Serverless stack for stage: ${{ github.event.inputs.stage }}"
+          serverless remove --stage ${{ github.event.inputs.stage }} --region ${{ env.AWS_REGION }} --verbose
+
+      - name: Manual cleanup of remaining resources
+        run: |
+          echo "🧹 Cleaning up any remaining resources..."
+
+          # Clean up SSM parameters
+          aws ssm delete-parameter \
+            --name "/peddler/${{ github.event.inputs.stage }}/config" \
+            --region ${{ env.AWS_REGION }} || true
+
+          # Note: Secrets Manager secrets are retained by default for recovery
+          echo "⚠️ Secrets Manager secrets are retained for 7-30 days by default"
+          echo "Use AWS Console to force delete if needed"
+
+      - name: Verify cleanup
+        run: |
+          echo "🔍 Verifying cleanup..."
+
+          # Check for remaining Lambda functions
+          FUNCTIONS=$(aws lambda list-functions \
+            --query "Functions[?starts_with(FunctionName, 'peddler-${{ github.event.inputs.stage }}')].FunctionName" \
+            --output text --region ${{ env.AWS_REGION }})
+
+          if [ -n "$FUNCTIONS" ]; then
+            echo "⚠️ Remaining Lambda functions: $FUNCTIONS"
+          else
+            echo "✅ No Lambda functions found"
+          fi
+
+          # Check for DynamoDB tables
+          TABLES=$(aws dynamodb list-tables \
+            --query "TableNames[?starts_with(@, 'peddler-listings-${{ github.event.inputs.stage }}')]" \
+            --output text --region ${{ env.AWS_REGION }})
+
+          if [ -n "$TABLES" ]; then
+            echo "⚠️ Remaining DynamoDB tables: $TABLES"
+          else
+            echo "✅ No DynamoDB tables found"
+          fi
+
+      - name: Create cleanup summary
+        run: |
+          echo "## 🗑️ Cleanup Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stage**: ${{ github.event.inputs.stage }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region**: ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Performed by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Time**: $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Resources Removed" >> $GITHUB_STEP_SUMMARY
+          echo "- Lambda functions (scheduler, scraper, notifier)" >> $GITHUB_STEP_SUMMARY
+          echo "- DynamoDB table (listings)" >> $GITHUB_STEP_SUMMARY
+          echo "- EventBridge rules" >> $GITHUB_STEP_SUMMARY
+          echo "- IAM roles and policies" >> $GITHUB_STEP_SUMMARY
+          echo "- CloudWatch log groups" >> $GITHUB_STEP_SUMMARY
+          echo "- SSM parameters" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **Note**: Secrets Manager secrets are retained for recovery"
+
+      - name: Upload backup artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: peddler-backup-${{ github.event.inputs.stage }}-${{ github.run_number }}
+          path: backups/
+          retention-days: 30
+
+  confirmation-failed:
+    name: Cleanup Cancelled
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm != 'DELETE'
+    steps:
+      - name: Cancel cleanup
+        run: |
+          echo "❌ Cleanup cancelled - confirmation input was: '${{ github.event.inputs.confirm }}'"
+          echo "To proceed with cleanup, you must type exactly: DELETE"
+          echo "This is a safety measure to prevent accidental resource deletion."
+          exit 1

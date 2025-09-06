@@ -1,5 +1,9 @@
 # Peddler 🏪
 
+![Deploy Status](https://github.com/kevinmarx/peddler/actions/workflows/deploy.yml/badge.svg)
+![PR Validation](https://github.com/kevinmarx/peddler/actions/workflows/pr-validation.yml/badge.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A cloud-based alerting system that monitors Facebook Marketplace (and potentially other marketplaces) for new listings and price drops. Built on AWS serverless architecture for scalability and cost-effectiveness.
 
 ## Overview
@@ -256,11 +260,49 @@ npm test -- --testNamePattern="ScraperService"
 
 ## Deployment
 
-### Stages
+### Option 1: GitHub Actions (Recommended)
+
+Set up automated deployment using GitHub Actions for the best experience:
+
+1. **Configure Repository Secrets:**
+   ```
+   AWS_ACCESS_KEY_ID          # AWS credentials for dev
+   AWS_SECRET_ACCESS_KEY
+   AWS_ACCESS_KEY_ID_PROD     # AWS credentials for prod
+   AWS_SECRET_ACCESS_KEY_PROD
+   PEDDLER_SECRETS           # JSON with notification tokens
+   PEDDLER_SECRETS_PROD
+   ```
+
+2. **Configure Repository Variables:**
+   ```
+   SCRAPERS_CONFIG           # JSON with dev scraper configs
+   SCRAPERS_CONFIG_PROD      # JSON with prod scraper configs
+   ```
+
+3. **Deploy via Git:**
+   ```bash
+   # Deploy to dev
+   git push origin develop
+
+   # Deploy to prod
+   git push origin main
+
+   # Manual deployment
+   # Go to Actions tab > Deploy Peddler > Run workflow
+   ```
+
+📖 **Full setup guide:** [docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md)
+
+### Option 2: Manual Deployment
+
+For local deployment without GitHub Actions:
+
+#### Stages
 - **dev**: Development environment
 - **prod**: Production environment
 
-### Deploy Commands
+#### Deploy Commands
 ```bash
 # Deploy to dev
 npm run deploy:dev
@@ -270,6 +312,9 @@ npm run deploy:prod
 
 # Remove deployment
 npm run remove
+
+# Use deployment script
+./scripts/deploy.sh dev us-east-1
 ```
 
 ### Environment Variables

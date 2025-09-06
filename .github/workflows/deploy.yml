@@ -1,0 +1,230 @@
+name: Deploy Peddler
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: 'Deployment stage'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      region:
+        description: 'AWS Region'
+        required: true
+        default: 'us-east-1'
+        type: string
+
+env:
+  NODE_VERSION: '18'
+  AWS_REGION: ${{ github.event.inputs.region || 'us-east-1' }}
+
+jobs:
+  test:
+    name: Test and Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build TypeScript
+        run: npm run build
+
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.stage == 'dev')
+    environment: development
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Serverless Framework
+        run: npm install -g serverless@3
+
+      - name: Deploy to AWS
+        run: serverless deploy --stage dev --region ${{ env.AWS_REGION }} --verbose
+
+      - name: Update configuration (if provided)
+        if: vars.SCRAPERS_CONFIG != ''
+        run: |
+          echo '${{ vars.SCRAPERS_CONFIG }}' > /tmp/config.json
+          aws ssm put-parameter \
+            --name "/peddler/dev/config" \
+            --value file:///tmp/config.json \
+            --type String \
+            --overwrite \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Update secrets (if provided)
+        if: secrets.PEDDLER_SECRETS != ''
+        run: |
+          aws secretsmanager update-secret \
+            --secret-id "peddler/dev/secrets" \
+            --secret-string '${{ secrets.PEDDLER_SECRETS }}' \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Test deployment
+        run: |
+          echo "Testing scheduler function..."
+          serverless invoke -f scheduler --stage dev --region ${{ env.AWS_REGION }}
+
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.stage == 'prod')
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Serverless Framework
+        run: npm install -g serverless@3
+
+      - name: Deploy to AWS
+        run: serverless deploy --stage prod --region ${{ env.AWS_REGION }} --verbose
+
+      - name: Update configuration (if provided)
+        if: vars.SCRAPERS_CONFIG_PROD != ''
+        run: |
+          echo '${{ vars.SCRAPERS_CONFIG_PROD }}' > /tmp/config.json
+          aws ssm put-parameter \
+            --name "/peddler/prod/config" \
+            --value file:///tmp/config.json \
+            --type String \
+            --overwrite \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Update secrets (if provided)
+        if: secrets.PEDDLER_SECRETS_PROD != ''
+        run: |
+          aws secretsmanager update-secret \
+            --secret-id "peddler/prod/secrets" \
+            --secret-string '${{ secrets.PEDDLER_SECRETS_PROD }}' \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Test deployment
+        run: |
+          echo "Testing production scheduler function..."
+          serverless invoke -f scheduler --stage prod --region ${{ env.AWS_REGION }}
+
+      - name: Create deployment summary
+        run: |
+          echo "## 🚀 Production Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stage**: production" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region**: ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployed by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Verify scrapers are configured in SSM Parameter Store" >> $GITHUB_STEP_SUMMARY
+          echo "2. Check notification secrets in AWS Secrets Manager" >> $GITHUB_STEP_SUMMARY
+          echo "3. Monitor CloudWatch logs for execution" >> $GITHUB_STEP_SUMMARY
+
+  notify:
+    name: Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: [deploy-dev, deploy-prod]
+    if: always() && (needs.deploy-dev.result != 'skipped' || needs.deploy-prod.result != 'skipped')
+    steps:
+      - name: Determine deployment status
+        id: status
+        run: |
+          if [[ "${{ needs.deploy-dev.result }}" == "success" || "${{ needs.deploy-prod.result }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "message=Deployment completed successfully" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "message=Deployment failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Slack notification
+        if: secrets.SLACK_WEBHOOK_URL != ''
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              text: "${{ steps.status.outputs.message }}",
+              attachments: [{
+                color: "${{ steps.status.outputs.status == 'success' && 'good' || 'danger' }}",
+                fields: [{
+                  title: "Repository",
+                  value: "${{ github.repository }}",
+                  short: true
+                }, {
+                  title: "Branch",
+                  value: "${{ github.ref_name }}",
+                  short: true
+                }, {
+                  title: "Commit",
+                  value: "${{ github.sha }}",
+                  short: true
+                }, {
+                  title: "Actor",
+                  value: "${{ github.actor }}",
+                  short: true
+                }]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

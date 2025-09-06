@@ -8,6 +8,8 @@
   },
   "scripts": {
     "test": "jest",
+    "test:coverage": "jest --coverage",
+    "test:watch": "jest --watch",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "build": "tsc",
@@ -16,7 +18,10 @@
     "deploy:prod": "serverless deploy --stage prod",
     "remove": "serverless remove",
     "logs": "serverless logs -f scheduler",
-    "invoke": "serverless invoke -f scheduler"
+    "invoke": "serverless invoke -f scheduler",
+    "act:pr": "act pull_request --secret-file .env.local",
+    "act:push": "act push --secret-file .env.local",
+    "prepare": "npm run build"
   },
   "keywords": [
     "marketplace",

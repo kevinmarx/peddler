@@ -1,0 +1,180 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    types: [opened, synchronize, reopened]
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  validate:
+    name: Validate Pull Request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test -- --coverage --watchAll=false
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Validate serverless configuration
+        run: |
+          npm install -g serverless@3
+          serverless print --stage dev --region us-east-1
+
+      - name: Check for secrets in code
+        run: |
+          if grep -r -i -E "(password|secret|key|token)" --include="*.ts" --include="*.js" src/ | grep -v "from-secrets" | grep -v "// NOSONAR" | grep -v "secretsmanager"; then
+            echo "❌ Potential secrets found in code. Please use AWS Secrets Manager."
+            exit 1
+          else
+            echo "✅ No hardcoded secrets found"
+          fi
+
+      - name: Validate example configurations
+        run: |
+          echo "Validating example configuration files..."
+          if [[ -f examples/config.json ]]; then
+            node -e "JSON.parse(require('fs').readFileSync('examples/config.json', 'utf8'))"
+            echo "✅ config.json is valid JSON"
+          fi
+          if [[ -f examples/secrets.json ]]; then
+            node -e "JSON.parse(require('fs').readFileSync('examples/secrets.json', 'utf8'))"
+            echo "✅ secrets.json is valid JSON"
+          fi
+
+      - name: Check documentation
+        run: |
+          if [[ ! -f README.md ]] || [[ ! -f docs/SETUP.md ]]; then
+            echo "❌ Required documentation files are missing"
+            exit 1
+          fi
+          echo "✅ Documentation files present"
+
+      - name: Upload coverage reports
+        if: always()
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run security audit
+        run: npm audit --audit-level=moderate
+
+      - name: Scan for vulnerabilities with Snyk
+        if: secrets.SNYK_TOKEN != ''
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+  comment:
+    name: PR Comment
+    runs-on: ubuntu-latest
+    needs: [validate, security]
+    if: always()
+    steps:
+      - name: Create PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' && comment.body.includes('## 🤖 Peddler PR Validation')
+            );
+
+            const validationStatus = '${{ needs.validate.result }}';
+            const securityStatus = '${{ needs.security.result }}';
+
+            let status = '✅ PASSED';
+            let color = '🟢';
+
+            if (validationStatus === 'failure' || securityStatus === 'failure') {
+              status = '❌ FAILED';
+              color = '🔴';
+            } else if (validationStatus === 'cancelled' || securityStatus === 'cancelled') {
+              status = '⚠️ CANCELLED';
+              color = '🟡';
+            }
+
+            const body = `## 🤖 Peddler PR Validation ${color}
+
+            **Overall Status: ${status}**
+
+            | Check | Status |
+            |-------|--------|
+            | Code Quality & Tests | ${{ needs.validate.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+            | Security Scan | ${{ needs.security.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+
+            ### Summary
+            - **Linting**: ${{ needs.validate.result == 'success' && 'Passed' || 'Check logs' }}
+            - **Tests**: ${{ needs.validate.result == 'success' && 'Passed' || 'Check logs' }}
+            - **Build**: ${{ needs.validate.result == 'success' && 'Passed' || 'Check logs' }}
+            - **Security**: ${{ needs.security.result == 'success' && 'Passed' || 'Check logs' }}
+
+            ${status.includes('FAILED') ? '⚠️ Please fix the failing checks before merging.' : '🚀 This PR is ready for review!'}
+
+            ---
+            *Auto-generated by GitHub Actions*`;
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
