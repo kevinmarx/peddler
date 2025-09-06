@@ -1,0 +1,174 @@
+service: peddler
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+
+  environment:
+    STAGE: ${self:provider.stage}
+    LISTINGS_TABLE: ${self:service}-listings-${self:provider.stage}
+    CONFIG_PARAMETER: /${self:service}/${self:provider.stage}/config
+    SECRETS_NAME: ${self:service}/${self:provider.stage}/secrets
+
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+        - dynamodb:DeleteItem
+        - dynamodb:Query
+        - dynamodb:Scan
+        - dynamodb:BatchGetItem
+        - dynamodb:BatchWriteItem
+      Resource:
+        - "arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.LISTINGS_TABLE}"
+        - "arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.LISTINGS_TABLE}/index/*"
+    - Effect: Allow
+      Action:
+        - ssm:GetParameter
+        - ssm:GetParameters
+        - ssm:PutParameter
+      Resource:
+        - "arn:aws:ssm:${self:provider.region}:*:parameter${self:provider.environment.CONFIG_PARAMETER}"
+    - Effect: Allow
+      Action:
+        - secretsmanager:GetSecretValue
+      Resource:
+        - "arn:aws:secretsmanager:${self:provider.region}:*:secret:${self:provider.environment.SECRETS_NAME}*"
+    - Effect: Allow
+      Action:
+        - logs:CreateLogGroup
+        - logs:CreateLogStream
+        - logs:PutLogEvents
+      Resource: "*"
+
+functions:
+  scheduler:
+    handler: src/handlers/scheduler.handler
+    timeout: 900
+    memorySize: 1024
+    events:
+      - schedule:
+          rate: rate(10 minutes)
+          enabled: true
+    environment:
+      MAX_CONCURRENT_SCRAPERS: 10
+
+  scraper:
+    handler: src/handlers/scraper.handler
+    timeout: 300
+    memorySize: 512
+
+  notifier:
+    handler: src/handlers/notifier.handler
+    timeout: 60
+    memorySize: 256
+
+plugins:
+  - serverless-plugin-typescript
+
+resources:
+  Resources:
+    ListingsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.LISTINGS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: scraperId
+            AttributeType: S
+          - AttributeName: listingId
+            AttributeType: S
+          - AttributeName: firstSeen
+            AttributeType: S
+        KeySchema:
+          - AttributeName: scraperId
+            KeyType: HASH
+          - AttributeName: listingId
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: FirstSeenIndex
+            KeySchema:
+              - AttributeName: scraperId
+                KeyType: HASH
+              - AttributeName: firstSeen
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        TimeToLiveSpecification:
+          AttributeName: expiresAt
+          Enabled: true
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+
+    ConfigParameter:
+      Type: AWS::SSM::Parameter
+      Properties:
+        Name: ${self:provider.environment.CONFIG_PARAMETER}
+        Type: String
+        Value: |
+          {
+            "scrapers": [
+              {
+                "id": "example-scraper",
+                "name": "Example Facebook Marketplace Search",
+                "enabled": true,
+                "marketplace": "facebook",
+                "query": "honda civic",
+                "location": "Seattle, WA",
+                "radius": 25,
+                "priceMin": 5000,
+                "priceMax": 15000,
+                "includeKeywords": ["manual", "stick"],
+                "excludeKeywords": ["accident", "salvage", "flood"],
+                "scrollDepth": 3,
+                "priceDropThreshold": 0.1,
+                "notifications": {
+                  "slack": {
+                    "enabled": true,
+                    "webhook": "slack-webhook-url-from-secrets"
+                  },
+                  "telegram": {
+                    "enabled": false,
+                    "botToken": "telegram-bot-token-from-secrets",
+                    "chatId": "telegram-chat-id-from-secrets"
+                  },
+                  "pushover": {
+                    "enabled": false,
+                    "userKey": "pushover-user-key-from-secrets",
+                    "appToken": "pushover-app-token-from-secrets"
+                  }
+                }
+              }
+            ]
+          }
+        Description: "Peddler scraper configuration"
+
+    SecretsManager:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: ${self:provider.environment.SECRETS_NAME}
+        Description: "Peddler secrets for authentication and notifications"
+        SecretString: |
+          {
+            "facebook-cookies": "",
+            "slack-webhook-url": "",
+            "telegram-bot-token": "",
+            "telegram-chat-id": "",
+            "pushover-user-key": "",
+            "pushover-app-token": ""
+          }
+
+package:
+  exclude:
+    - node_modules/**
+    - .git/**
+    - tests/**
+    - "*.md"
+    - .eslintrc.js
+    - jest.config.js
+    - tsconfig.json

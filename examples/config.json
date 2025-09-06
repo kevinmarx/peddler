@@ -1,0 +1,78 @@
+{
+  "scrapers": [
+    {
+      "id": "honda-civic-manual",
+      "name": "Honda Civic Manual Transmission",
+      "enabled": true,
+      "marketplace": "facebook",
+      "query": "honda civic",
+      "location": "Seattle, WA",
+      "radius": 25,
+      "priceMin": 5000,
+      "priceMax": 15000,
+      "includeKeywords": ["manual", "stick", "mt"],
+      "excludeKeywords": ["accident", "salvage", "flood", "rebuilt"],
+      "scrollDepth": 3,
+      "priceDropThreshold": 0.1,
+      "notifications": {
+        "slack": {
+          "enabled": true,
+          "webhook": "slack-webhook-url-from-secrets"
+        },
+        "telegram": {
+          "enabled": false,
+          "botToken": "telegram-bot-token-from-secrets",
+          "chatId": "telegram-chat-id-from-secrets"
+        },
+        "pushover": {
+          "enabled": false,
+          "userKey": "pushover-user-key-from-secrets",
+          "appToken": "pushover-app-token-from-secrets"
+        }
+      }
+    },
+    {
+      "id": "toyota-4runner",
+      "name": "Toyota 4Runner Search",
+      "enabled": false,
+      "marketplace": "facebook",
+      "query": "toyota 4runner",
+      "location": "Portland, OR",
+      "radius": 50,
+      "priceMin": 15000,
+      "priceMax": 35000,
+      "includeKeywords": ["4wd", "awd"],
+      "excludeKeywords": ["2wd", "accident", "salvage"],
+      "scrollDepth": 2,
+      "priceDropThreshold": 0.05,
+      "notifications": {
+        "slack": {
+          "enabled": true,
+          "webhook": "slack-webhook-url-from-secrets"
+        }
+      }
+    },
+    {
+      "id": "macbook-pro",
+      "name": "MacBook Pro Deals",
+      "enabled": false,
+      "marketplace": "facebook",
+      "query": "macbook pro",
+      "location": "San Francisco, CA",
+      "radius": 30,
+      "priceMin": 800,
+      "priceMax": 2000,
+      "includeKeywords": ["16 inch", "m1", "m2"],
+      "excludeKeywords": ["broken", "cracked", "water damage"],
+      "scrollDepth": 2,
+      "priceDropThreshold": 0.15,
+      "notifications": {
+        "telegram": {
+          "enabled": true,
+          "botToken": "telegram-bot-token-from-secrets",
+          "chatId": "telegram-chat-id-from-secrets"
+        }
+      }
+    }
+  ]
+}
