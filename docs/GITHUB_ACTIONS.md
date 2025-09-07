@@ -1,113 +1,63 @@
-# GitHub Actions Deployment Guide
+# GitHub Actions Deployment
 
-This guide explains how to set up automated deployment of Peddler using GitHub Actions.
+This guide explains how to set up automated deployment of Peddler using GitHub Actions with Terraform and OIDC authentication.
 
 ## Overview
 
-The GitHub Actions workflows provide:
-- **Automated deployment** to dev/prod environments
-- **Pull request validation** with linting, testing, and security scans
-- **Manual cleanup** of AWS resources
-- **Slack notifications** for deployment status
+The deployment uses:
+- **Terraform** for Infrastructure as Code
+- **OIDC** for secure AWS authentication (no long-lived keys)
+- **GitHub Actions** for CI/CD automation
+- **S3** for Terraform state storage
 
-## Workflow Files
+## Prerequisites
 
-| Workflow | File | Trigger | Purpose |
-|----------|------|---------|---------|
-| Deploy | `deploy.yml` | Push to main/develop, manual | Deploy to AWS |
-| PR Validation | `pr-validation.yml` | Pull requests | Code quality checks |
-| Cleanup | `cleanup.yml` | Manual only | Remove AWS resources |
+1. **AWS Account** with administrator access
+2. **S3 bucket** for Terraform state storage
+3. **GitHub repository** with Peddler code
 
 ## Setup Instructions
 
-### 1. Repository Secrets
+### 1. Create S3 State Bucket
 
-Configure these secrets in your GitHub repository settings (`Settings > Secrets and variables > Actions`):
-
-#### Required for Development Deployment
-```
-AWS_ACCESS_KEY_ID          # AWS access key for dev environment
-AWS_SECRET_ACCESS_KEY      # AWS secret key for dev environment
-```
-
-#### Required for Production Deployment
-```
-AWS_ACCESS_KEY_ID_PROD     # AWS access key for prod environment
-AWS_SECRET_ACCESS_KEY_PROD # AWS secret key for prod environment
+```bash
+aws s3 mb s3://your-terraform-state-bucket
+aws s3api put-bucket-versioning \
+  --bucket your-terraform-state-bucket \
+  --versioning-configuration Status=Enabled
 ```
 
-#### Optional Secrets
-```
-PEDDLER_SECRETS            # JSON string with dev notification credentials
-PEDDLER_SECRETS_PROD       # JSON string with prod notification credentials
-SLACK_WEBHOOK_URL          # For deployment notifications
-CODECOV_TOKEN              # For code coverage reports
-SNYK_TOKEN                 # For security vulnerability scanning
-```
+### 2. Set Up OIDC Provider
 
-### 2. Repository Variables
+Create the OIDC identity provider:
 
-Configure these variables for automatic configuration deployment:
-
-#### Development Configuration
-```
-SCRAPERS_CONFIG            # JSON string with dev scraper configurations
+```bash
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
 ```
 
-#### Production Configuration
-```
-SCRAPERS_CONFIG_PROD       # JSON string with prod scraper configurations
-```
+### 3. Create IAM Role
 
-### 3. Environment Protection Rules
+Create `github-actions-role-trust-policy.json`:
 
-Set up environment protection rules in `Settings > Environments`:
-
-#### Development Environment
-- No protection rules needed
-- Deploys automatically on push to `develop` branch
-
-#### Production Environment
-- **Required reviewers**: Add team members who must approve prod deployments
-- **Restrict branches**: Only allow `main` branch
-- **Deployment protection rules**: Consider adding wait timers
-
-## Secret Format Examples
-
-### PEDDLER_SECRETS
 ```json
 {
-  "facebook-cookies": "c_user=123; xs=abc...; fr=xyz...",
-  "slack-webhook-url": "https://hooks.slack.com/services/...",
-  "telegram-bot-token": "123456789:ABC...",
-  "telegram-chat-id": "-123456789",
-  "pushover-user-key": "uQiRzpo4DXgh...",
-  "pushover-app-token": "azGDORePK8gM..."
-}
-```
-
-### SCRAPERS_CONFIG
-```json
-{
-  "scrapers": [
+  "Version": "2012-10-17",
+  "Statement": [
     {
-      "id": "honda-civic",
-      "name": "Honda Civic Search",
-      "enabled": true,
-      "marketplace": "facebook",
-      "query": "honda civic",
-      "location": "Seattle, WA",
-      "radius": 25,
-      "priceMin": 5000,
-      "priceMax": 15000,
-      "includeKeywords": ["manual"],
-      "excludeKeywords": ["accident"],
-      "scrollDepth": 3,
-      "priceDropThreshold": 0.1,
-      "notifications": {
-        "slack": {
-          "enabled": true,
-          "webhook": "slack-webhook-url-from-secrets"
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::YOUR_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:YOUR_USERNAME/peddler:*"
         }
       }
     }
@@ -115,78 +65,26 @@ Set up environment protection rules in `Settings > Environments`:
 }
 ```
 
-## Deployment Workflow
+Create the role:
 
-### Automatic Deployments
-
-1. **Development**: Push to `develop` branch
-   - Runs tests and linting
-   - Deploys to `dev` stage
-   - Updates configuration and secrets if provided
-
-2. **Production**: Push to `main` branch
-   - Runs tests and linting
-   - Requires environment approval (if configured)
-   - Deploys to `prod` stage
-   - Creates deployment summary
-
-### Manual Deployments
-
-Use the "Deploy Peddler" workflow with custom inputs:
-1. Go to `Actions` tab in GitHub
-2. Select "Deploy Peddler" workflow
-3. Click "Run workflow"
-4. Choose stage and region
-5. Click "Run workflow"
-
-## Branch Strategy
-
-Recommended Git flow:
-```
-feature/new-scraper → develop → main
-                        ↓        ↓
-                    Deploy Dev  Deploy Prod
+```bash
+aws iam create-role \
+  --role-name peddler-github-actions \
+  --assume-role-policy-document file://github-actions-role-trust-policy.json
 ```
 
-- **Feature branches**: Create PRs to `develop`
-- **Develop branch**: Auto-deploys to dev environment
-- **Main branch**: Auto-deploys to production (with approval)
+### 4. Attach Permissions
 
-## Monitoring and Notifications
+Create and attach a policy for Terraform operations:
 
-### Deployment Status
-- Check the `Actions` tab for workflow runs
-- Deployment summaries appear in workflow run details
-- Failed deployments send notifications (if Slack webhook configured)
+```bash
+# Create policy for Terraform permissions
+aws iam attach-role-policy \
+  --role-name peddler-github-actions \
+  --policy-arn arn:aws:iam::aws:policy/PowerUserAccess
 
-### AWS Resource Monitoring
-- Lambda function logs in CloudWatch
-- DynamoDB metrics in AWS Console
-- Scheduler execution via EventBridge
-
-## Troubleshooting
-
-### Common Issues
-
-#### "AWS credentials not found"
-- Verify secrets are set in repository settings
-- Check secret names match exactly (case-sensitive)
-- Ensure IAM user has necessary permissions
-
-#### "Serverless deployment failed"
-- Check AWS service limits in target region
-- Verify IAM permissions for Serverless operations
-- Review CloudFormation events in AWS Console
-
-#### "Configuration update failed"
-- Validate JSON format in repository variables
-- Check SSM parameter permissions
-- Verify parameter name format
-
-### Required IAM Permissions
-
-The AWS credentials need these minimum permissions:
-```json
+# Alternative: Create custom policy with minimal permissions
+cat << EOF > terraform-permissions.json
 {
   "Version": "2012-10-17",
   "Statement": [
@@ -195,43 +93,258 @@ The AWS credentials need these minimum permissions:
       "Action": [
         "lambda:*",
         "iam:*",
-        "cloudformation:*",
         "dynamodb:*",
         "events:*",
         "logs:*",
         "ssm:*",
         "secretsmanager:*",
-        "s3:*"
+        "s3:GetObject",
+        "s3:PutObject"
       ],
       "Resource": "*"
     }
   ]
 }
+EOF
+
+aws iam create-policy \
+  --policy-name TerraformPeddlerPolicy \
+  --policy-document file://terraform-permissions.json
+
+aws iam attach-role-policy \
+  --role-name peddler-github-actions \
+  --policy-arn arn:aws:iam::YOUR_ACCOUNT_ID:policy/TerraformPeddlerPolicy
+```
+
+### 5. Configure Repository Secrets
+
+Add these secrets to your GitHub repository (Settings → Secrets and variables → Actions):
+
+- `AWS_ROLE_ARN`: `arn:aws:iam::YOUR_ACCOUNT_ID:role/peddler-github-actions`
+- `AWS_REGION`: `us-east-1` (or your preferred region)
+- `TF_STATE_BUCKET`: `your-terraform-state-bucket`
+
+### 6. Configure Terraform Backend
+
+Create `infrastructure/backend.tf`:
+
+```hcl
+terraform {
+  backend "s3" {
+    # These values are set by GitHub Actions
+    # bucket = "set-by-github-actions"
+    # key    = "peddler/terraform.tfstate"
+    # region = "set-by-github-actions"
+  }
+}
+```
+
+## Workflow Details
+
+### Deploy Workflow (`.github/workflows/deploy.yml`)
+
+Triggers on:
+- Push to `main` branch
+- Manual dispatch
+
+Steps:
+1. **Checkout code**
+2. **Configure AWS credentials** via OIDC
+3. **Setup Node.js** and install dependencies
+4. **Build and package** Lambda functions
+5. **Initialize Terraform** with S3 backend
+6. **Plan and apply** Terraform changes
+
+### PR Validation Workflow (`.github/workflows/pr-validation.yml`)
+
+Triggers on:
+- Pull requests to `main`
+
+Steps:
+1. **Lint and type check** TypeScript code
+2. **Run tests**
+3. **Validate Terraform** configuration
+4. **Plan Terraform** changes (dry-run)
+
+### Cleanup Workflow (`.github/workflows/cleanup.yml`)
+
+Manual workflow for destroying resources:
+1. **Manual approval** required
+2. **Terraform destroy** with confirmation
+
+## Environment Configuration
+
+### Multiple Environments
+
+Use different AWS accounts or modify the Terraform workspace:
+
+```yaml
+# In deploy.yml
+- name: Configure Environment
+  run: |
+    if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+      echo "ENVIRONMENT=production" >> $GITHUB_ENV
+    else
+      echo "ENVIRONMENT=staging" >> $GITHUB_ENV
+    fi
+
+- name: Terraform Apply
+  run: |
+    terraform apply -auto-approve \
+      -var="environment=${{ env.ENVIRONMENT }}"
+```
+
+### Branch-based Deployments
+
+Deploy different branches to different environments:
+
+```yaml
+strategy:
+  matrix:
+    include:
+      - branch: main
+        environment: production
+        aws_region: us-east-1
+      - branch: develop
+        environment: staging
+        aws_region: us-west-2
 ```
 
 ## Security Best Practices
 
-1. **Separate AWS accounts** for dev/prod environments
-2. **Minimal IAM permissions** for deployment users
-3. **Environment protection rules** for production
-4. **Regular secret rotation** for long-lived credentials
-5. **Audit logs** for all deployment activities
+### OIDC Benefits
+- **No long-lived credentials** stored in GitHub
+- **Short-lived tokens** (1 hour expiry)
+- **Repository-specific access** via conditions
+- **Automatic rotation** with each job
 
-## Manual Cleanup
+### Additional Security
+1. **Least privilege** IAM policies
+2. **Branch protection** rules
+3. **Required reviews** for production deployments
+4. **Environment secrets** for sensitive values
+5. **Audit logging** with CloudTrail
 
-To remove all AWS resources:
-1. Go to `Actions` tab
-2. Select "Cleanup Resources" workflow
-3. Click "Run workflow"
-4. Select stage and region
-5. Type "DELETE" in confirmation field
-6. Click "Run workflow"
+## Monitoring and Troubleshooting
 
-⚠️ **Warning**: This permanently deletes all Peddler resources in the specified stage.
+### GitHub Actions Logs
 
-## Support
+View deployment status:
+- Go to repository → Actions tab
+- Click on workflow run
+- Review step-by-step logs
 
-- Check workflow run logs for detailed error messages
-- Review AWS CloudFormation stack events
-- Verify all secrets and variables are properly configured
-- Test deployments in development environment first
+### Common Issues
+
+#### "Could not assume role"
+- Verify OIDC provider exists
+- Check role trust policy conditions
+- Ensure repository name matches exactly
+
+#### "Access denied" during Terraform
+- Review IAM policy permissions
+- Check resource naming conflicts
+- Verify AWS region settings
+
+#### "State lock timeout"
+- Another deployment may be running
+- Force unlock if needed: `terraform force-unlock LOCK_ID`
+
+#### Lambda package too large
+- Optimize dependencies
+- Use S3 for deployment packages
+- Enable function-level packaging
+
+### Debugging Commands
+
+```bash
+# Check OIDC provider
+aws iam get-open-id-connect-provider \
+  --open-id-connect-provider-arn arn:aws:iam::ACCOUNT:oidc-provider/token.actions.githubusercontent.com
+
+# Verify role
+aws iam get-role --role-name peddler-github-actions
+
+# List attached policies
+aws iam list-attached-role-policies --role-name peddler-github-actions
+
+# Check Terraform state
+aws s3 ls s3://your-terraform-state-bucket/peddler/
+```
+
+## Advanced Configuration
+
+### Matrix Builds
+
+Deploy to multiple regions:
+
+```yaml
+strategy:
+  matrix:
+    region: [us-east-1, us-west-2, eu-west-1]
+steps:
+  - name: Deploy to ${{ matrix.region }}
+    run: terraform apply -var="aws_region=${{ matrix.region }}"
+```
+
+### Conditional Deployments
+
+Skip deployment for documentation changes:
+
+```yaml
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+```
+
+### Slack Notifications
+
+Add deployment notifications:
+
+```yaml
+- name: Notify Deployment
+  if: always()
+  uses: 8398a7/action-slack@v3
+  with:
+    status: ${{ job.status }}
+    webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+```
+
+## Cost Optimization
+
+### Efficient Workflows
+- Use `actions/cache` for dependencies
+- Skip unchanged infrastructure
+- Parallel jobs where possible
+- Cleanup temporary resources
+
+### Resource Management
+- Set appropriate timeouts
+- Use conditional resource creation
+- Monitor AWS costs regularly
+- Clean up failed deployments
+
+## Migration from Serverless
+
+If migrating from Serverless Framework:
+
+1. **Keep existing workflows** initially
+2. **Create parallel Terraform deployment**
+3. **Test thoroughly** in staging
+4. **Import existing resources** to Terraform state
+5. **Switch over** during maintenance window
+6. **Remove Serverless** configurations
+
+## Best Practices
+
+1. **Always test** in non-production first
+2. **Use pull requests** for infrastructure changes
+3. **Review Terraform plans** before applying
+4. **Tag all resources** for cost tracking
+5. **Monitor deployment metrics**
+6. **Keep sensitive data** in repository secrets
+7. **Document environment-specific** configurations
+8. **Regular security reviews** of permissions

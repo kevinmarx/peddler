@@ -69,7 +69,7 @@ Peddler automatically runs on a schedule to monitor multiple marketplace searche
 ### Prerequisites
 - Node.js 18+
 - AWS CLI configured
-- Serverless Framework
+- Terraform >= 1.0
 
 ### Installation
 
@@ -82,17 +82,24 @@ Peddler automatically runs on a schedule to monitor multiple marketplace searche
 
 2. **Deploy to AWS:**
    ```bash
-   npm run deploy:dev
+   # Build and package
+   npm run build
+   npm run package
+
+   # Deploy with Terraform
+   cd infrastructure
+   terraform init
+   terraform apply
    ```
 
 3. **Configure your first scraper:**
    - Go to AWS SSM Parameter Store
-   - Find the parameter: `/peddler/dev/config`
+   - Find the parameter: `/peddler/production/config`
    - Edit the JSON to add your search criteria
 
 4. **Add notification secrets:**
    - Go to AWS Secrets Manager
-   - Find the secret: `peddler/dev/secrets`
+   - Find the secret: `peddler/production/secrets`
    - Add your notification service API keys
 
 ### Configuration
@@ -262,62 +269,49 @@ npm test -- --testNamePattern="ScraperService"
 
 ### Option 1: GitHub Actions (Recommended)
 
-Set up automated deployment using GitHub Actions for the best experience:
+Set up automated deployment using GitHub Actions with Terraform:
 
 1. **Configure Repository Secrets:**
    ```
-   AWS_ACCESS_KEY_ID          # AWS credentials for dev
-   AWS_SECRET_ACCESS_KEY
-   AWS_ACCESS_KEY_ID_PROD     # AWS credentials for prod
-   AWS_SECRET_ACCESS_KEY_PROD
-   PEDDLER_SECRETS           # JSON with notification tokens
-   PEDDLER_SECRETS_PROD
+   AWS_ROLE_ARN              # AWS IAM role ARN for OIDC
+   PEDDLER_SECRETS          # JSON with notification tokens
    ```
 
 2. **Configure Repository Variables:**
    ```
-   SCRAPERS_CONFIG           # JSON with dev scraper configs
-   SCRAPERS_CONFIG_PROD      # JSON with prod scraper configs
+   SCRAPERS_CONFIG          # JSON with scraper configurations
    ```
 
 3. **Deploy via Git:**
    ```bash
-   # Deploy to dev
-   git push origin develop
-
-   # Deploy to prod
+   # Deploy to production
    git push origin main
 
-   # Manual deployment
-   # Go to Actions tab > Deploy Peddler > Run workflow
+   # Manual deployment with environment choice
+   # Go to Actions tab > Deploy > Run workflow
    ```
 
-📖 **Full setup guide:** [docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md)
+### Option 2: Local Terraform Deployment
 
-### Option 2: Manual Deployment
+For local deployment using Terraform:
 
-For local deployment without GitHub Actions:
-
-#### Stages
-- **dev**: Development environment
-- **prod**: Production environment
-
-#### Deploy Commands
 ```bash
-# Deploy to dev
-npm run deploy:dev
+# Initialize Terraform
+npm run tf:init
 
-# Deploy to production
-npm run deploy:prod
+# Plan deployment
+npm run tf:plan
 
-# Remove deployment
-npm run remove
+# Apply changes
+npm run tf:apply
 
-# Use deployment script
-./scripts/deploy.sh dev us-east-1
+# Package Lambda functions first if needed
+npm run package
 ```
 
-### Environment Variables
+### Option 3: Legacy Serverless (Deprecated)
+
+The old serverless deployment method is deprecated but still available in git history.### Environment Variables
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `STAGE` | Deployment stage | `dev` |
@@ -360,16 +354,75 @@ npm run remove
 - Lower `scrollDepth` values
 - Disable unused scrapers
 
+## Deployment
+
+### Local Development
+```bash
+# Build TypeScript
+npm run build
+
+# Run locally (requires AWS credentials)
+node dist/handlers/scheduler.js
+
+# Test individual components
+npm test
+```
+
+### Production Deployment
+
+#### GitHub Actions (Recommended)
+Push to `main` branch triggers automatic deployment via GitHub Actions. Requires:
+- `AWS_ROLE_ARN` repository secret with OIDC role
+- Terraform state bucket configured
+
+#### Manual Deployment
+```bash
+# Build and package
+npm run build
+npm run package
+
+# Deploy infrastructure
+cd infrastructure
+terraform plan
+terraform apply
+```
+
+See [docs/TERRAFORM.md](docs/TERRAFORM.md) for detailed deployment instructions.
+
+## Troubleshooting
+
+### Common Issues
+
+#### Scraping Failures
+- Check Facebook cookie validity
+- Verify search parameters in SSM
+- Review CloudWatch logs
+
+#### Missing Notifications
+- Verify secrets in Secrets Manager
+- Check notification webhook URLs
+- Test notification channels manually
+
+#### DynamoDB Throttling
+- Enable auto-scaling
+- Reduce concurrent scrapers
+- Review error logs in CloudWatch
+
+#### High Costs
+- Reduce scraper frequency
+- Lower `scrollDepth` values
+- Disable unused scrapers
+
 ### Debugging
 ```bash
 # View recent logs
-serverless logs -f scheduler --startTime 5m
+aws logs tail /aws/lambda/peddler-production-scheduler --follow
 
 # Check specific scraper logs
-serverless logs -f scraper --startTime 1h
+aws logs tail /aws/lambda/peddler-production-scraper --follow
 
 # Monitor DynamoDB usage
-aws dynamodb describe-table --table-name peddler-listings-dev
+aws dynamodb describe-table --table-name peddler-production-listings
 ```
 
 ## Contributing
